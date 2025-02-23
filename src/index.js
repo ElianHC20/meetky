@@ -3,8 +3,10 @@ const { Client } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const path = require('path');
 require('dotenv').config();
 
+// Inicializar Firebase Admin
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -24,39 +26,66 @@ async function initializeClient(businessId) {
   try {
     const client = new Client({
       puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      }
+        headless: true,
+        executablePath: process.env.CHROME_BIN || '/usr/bin/chromium',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--window-size=1920x1080',
+          '--remote-debugging-port=9222'
+        ]
+      },
+      webVersionCache: {
+        type: 'none'
+      },
+      webVersion: '2.2402.5',
+      restartOnAuthFail: true
     });
 
     client.on('qr', async (qr) => {
       try {
+        console.log('QR Code received');
         const qrCode = await qrcode.toDataURL(qr);
         await db.collection('whatsappClients').doc(businessId).set({
           qr: qrCode,
           status: 'qr_received',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          error: null
         });
-        console.log('QR Generated for:', businessId);
       } catch (error) {
         console.error('Error saving QR:', error);
       }
     });
 
     client.on('ready', async () => {
-      console.log('Client Ready:', businessId);
+      console.log('Client is ready!');
       await db.collection('whatsappClients').doc(businessId).set({
         status: 'connected',
         qr: null,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        error: null
       });
     });
 
-    client.on('disconnected', async () => {
-      console.log('Client Disconnected:', businessId);
-      clients.delete(businessId);
+    client.on('disconnected', async (reason) => {
+      console.log('Client was disconnected:', reason);
       await db.collection('whatsappClients').doc(businessId).set({
         status: 'disconnected',
-        qr: null,
+        error: reason,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      
+      clients.delete(businessId);
+    });
+
+    client.on('auth_failure', async (msg) => {
+      console.log('Auth failure:', msg);
+      await db.collection('whatsappClients').doc(businessId).set({
+        status: 'auth_failure',
+        error: msg,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
     });
@@ -66,54 +95,78 @@ async function initializeClient(businessId) {
     return client;
   } catch (error) {
     console.error('Error initializing client:', error);
+    await db.collection('whatsappClients').doc(businessId).set({
+      status: 'error',
+      error: error.message,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
     throw error;
   }
 }
 
+// Status endpoint
 app.get('/status/:businessId', async (req, res) => {
   try {
     const { businessId } = req.params;
     const doc = await db.collection('whatsappClients').doc(businessId).get();
-    res.json(doc.data() || { status: 'disconnected' });
+    const data = doc.data() || { status: 'disconnected' };
+    
+    res.json({
+      status: data.status,
+      isConnected: data.status === 'connected',
+      error: data.error
+    });
   } catch (error) {
     console.error('Error getting status:', error);
-    res.status(500).json({ error: 'Failed to get status' });
+    res.status(500).json({ error: error.message });
   }
 });
 
+// QR endpoint
 app.get('/qr/:businessId', async (req, res) => {
   try {
     const { businessId } = req.params;
     const doc = await db.collection('whatsappClients').doc(businessId).get();
     const data = doc.data();
-    
+
     if (data?.qr && data.status === 'qr_received') {
       res.json({ qr: data.qr });
     } else {
       res.status(404).json({ error: 'QR not available' });
     }
   } catch (error) {
-    res.status(500).json({ error: 'Failed to get QR' });
+    console.error('Error getting QR:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
+// Reset connection endpoint
 app.post('/reset-connection/:businessId', async (req, res) => {
   try {
     const { businessId } = req.params;
     
+    // Destroy existing client if it exists
     if (clients.has(businessId)) {
       const client = clients.get(businessId);
       await client.destroy();
       clients.delete(businessId);
     }
     
+    await db.collection('whatsappClients').doc(businessId).set({
+      status: 'initializing',
+      qr: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
     await initializeClient(businessId);
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to reset connection' });
+    console.error('Error resetting connection:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
+// Send message endpoint
 app.post('/send-message/:businessId', async (req, res) => {
   try {
     const { businessId } = req.params;
@@ -131,10 +184,18 @@ app.post('/send-message/:businessId', async (req, res) => {
     await client.sendMessage(`${phone}@c.us`, message);
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to send message' });
+    console.error('Error sending message:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: err.message });
+});
+
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
