@@ -1,0 +1,22 @@
+{
+    "name": "meetly-whatsapp-bot",
+    "version": "1.0.0",
+    "description": "Bot de WhatsApp para Meetly",
+    "main": "src/index.js",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "nodemon src/index.js"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "firebase-admin": "^13.1.0",
+        "qrcode": "^1.5.4",
+        "whatsapp-web.js": "^1.22.1",
+        "puppeteer": "^21.9.0"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.2"
+    }
+}
